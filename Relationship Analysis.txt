@@ -14,7 +14,7 @@ III)To analyse temperature and precipitation trend for a particular time range
 IV) To analyse relationship among Vegetation trends,Temperature, Precipitatiopn and NDBI.  
 
 The result of this analysis shows a positive correlation between NDVI and Precipitation
-and inverse relationship among NDVI and Temperature, NDBI. 
+and inverse correlation among NDVI and Temperature, NDBI. 
 *******************************************************************/
 
 //Load the shapefile of Dhakacity
