@@ -3,6 +3,6 @@ Dhaka is a growing megacity in Asia. This project entailes the relationship amon
 
 The objectives of this project are:
 I) To calculate the different vegetation trends NDVI, EVI and SAVI
-II)To Calculte Built-up Density ratio NDBI
+II)To Calculate Built-up Density ratio NDBI
 III)To analyse temperature and precipitation trend for a particular time range
-IV) To analyse reltionship among Vegetation trends,Temperature, Precipitatiopn and NDBI.  
+IV) To analyse relationship among Vegetation trends,Temperature, Precipitatiopn and NDBI.  
