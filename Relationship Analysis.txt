@@ -1,0 +1,590 @@
+/*****************************************************************
+Analysis of Relationship Among Vegetation trends, Temperature, Precipitation and
+Built-up Density of Dhakacity. 
+
+Author: Sharmin Shara Mim
+Last Updated: 25.03.2024
+
+Project Description: 
+This project is part of final submission of project for the course Cloud Computing in Remote Sensing. 
+The objectives of this project are:
+I) To calculate the different vegetation trends NDVI, EVI and SAVI
+II)To Calculte Built-up Density ratio NDBI
+III)To analyse temperature and precipitation trend for a particular time range
+IV) To analyse reltionship among Vegetation trends,Temperature, Precipitatiopn and NDBI.  
+
+The result of this analysis shows a positive correaltion between NDVI and Precipitation
+and inverse relationship among NDVI and Temperature, NDBI. 
+*******************************************************************/
+
+//Load the shapefile of Dhakacity
+var dhaka = ee.FeatureCollection('projects/ee-sharminsharamim2/assets/Dhaka');
+
+//define a time period
+var start = "2015-01-01";
+var end = "2020-01-01";
+
+//create a function to rename bands
+var renameBandsL8 = function(image){
+  var selected = image.select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5','SR_B6','SR_B7', 'QA_PIXEL']);
+  var renamed = selected.rename(['B', 'G', 'R', 'NIR','SWIR1','SWIR2', 'QA_PIXEL']);
+  return renamed;
+};
+
+// import Landsat 8 image collection with 30m resolution and pre-processing with necessary requirements
+var image_col = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2") // Landsat 8 Surface Reflectance
+  .filterBounds(dhaka) //filtering with our already loaded shapefile with city boundary
+  .filterDate(start, end)
+  .map(function(image){return image.clip(dhaka)}) //clipping to city boundary
+  .map(renameBandsL8); // change if other sensor is used
+
+
+// Part I 
+//Creating Cloud free Composite 
+
+// function to mask out clouds and shadows based on the QA_PIXEL band; needs to be adjusted if other sensor is used
+var cloudMask = function(image){
+  // Get the pixel QA band
+  var qa = image.select('QA_PIXEL');
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  var cloudshadowbitvalue = 8;
+  var cloudbitvalue = 32;
+  // Create masks
+  var shadow_mask = qa.bitwiseAnd(cloudshadowbitvalue).eq(0);
+  var cloud_mask = qa.bitwiseAnd(cloudbitvalue).eq(0);
+  // Given bit values should be set to zero for masking.
+  var final_mask = shadow_mask.and(cloud_mask);
+  return image.updateMask(final_mask);
+};
+
+
+// apply cloud mask function on collection 
+var my_image_col_cloudmask = image_col.map(cloudMask);
+// print('my image collection cloudmasked', my_image_col_cloudmask);
+
+Map.addLayer(my_image_col_cloudmask, {bands: ["R","G","B"], min: 7398, max: 20620}, 'image collection cloudmasked');
+// Map.centerObject(my_image_col_cloudmask);
+
+
+
+// Part II
+//Creating monthly composite
+
+// get the start and end date of the collection
+var start_date = ee.Date(my_image_col_cloudmask.first().get('system:time_start'));
+print('start_date', start_date);
+var end_date = ee.Date(my_image_col_cloudmask.sort('system:time_start', false).first().get('system:time_start'));
+print('end_date', end_date);
+
+// this is the window size in months
+var my_window = 1; // we want a composite for every month
+var numberOfWindows = end_date.difference(start_date,'month').divide(my_window).toInt();
+// generating a sequence that can be used as an indicator for the window step
+var sequence = ee.List.sequence(0, numberOfWindows);  // inclusive series so the number of windows will be correct
+// mapping over the sequence
+var monthly_col = ee.ImageCollection.fromImages(
+sequence.map(function(num){
+// casting element of sequence to a number object
+num = ee.Number(num);
+// finding the start and end point of the windows
+var windowStart = start_date.advance(num.multiply(my_window), 'month');
+var windowEnd = start_date.advance(num.add(1).multiply(my_window), 'month');
+// selecting images that fall within those windows
+var subset = my_image_col_cloudmask.filterDate(windowStart,windowEnd);
+// get current year and month for properties
+var year = ee.Number.parse(windowStart.format('YYYY'));
+var month = ee.Number.parse(windowStart.format('MM'));
+// calculating a median image of that window
+  return subset
+         .median()
+         .set('Year', year)
+         .set('Month', month)
+         .set('system:time_start', windowStart);
+}));
+
+
+// print("Monthly Collection", monthly_col);
+Map.addLayer(monthly_col.first(), {bands: ["R", "G", "B"], min: 7926, max:13126}, "one months composite");
+
+
+//Part III
+// Calulating Vegetation indices and Built-up density indices and Adding vegetation indices and Built-up density indices  to image collection         
+
+
+// function for the Normalised Difference Vegetation Index (NDVI)
+var ndvi = function(image){
+    var ndvi_img = image.expression(
+  "(NIR - RED)/(NIR + RED)",
+  {
+    NIR: image.select("NIR"),
+    RED: image.select("R"),
+  });
+    return image
+    .addBands(ndvi_img.rename('NDVI')).float();
+};
+
+// Create NDBI function
+var ndbi = function(image) {
+  var ndbi_img = image.expression(
+    "(NIR - SWIR) / (NIR + SWIR)",
+    {
+      NIR: image.select("NIR"),
+      SWIR: image.select("SWIR1")
+    }
+  );
+  return image.addBands(ndbi_img.rename('NDBI')).float();
+};
+
+
+// function for the Soil Adjusted Vegetation Index (SAVI)
+var savi = function(image){
+    var savi_img = image.expression(
+  "((NIR - RED)/(NIR + RED + L)) * (1 + L)",
+  {
+    NIR: image.select("NIR"),
+    RED: image.select("R"),
+    L: 0.5 // should be chosen smaller / bigger if vegetation is denser / less dense. Has to be between 0 and 1.
+  });
+    return image
+    .addBands(savi_img.rename('SAVI')).float();
+};
+
+
+// function for the Enhanced Vegetation Index (EVI)
+var evi = function(image){
+    var evi_img = image.expression(
+  " G * (NIR - RED) / ((NIR + C1*RED - C2*BLUE) + L)", 
+  {
+    NIR: image.select("NIR"),
+    RED: image.select("R"),
+    BLUE: image.select("B"),
+    G: 2.5, // variables chosen according to Landsat-8 specification
+    C1: 6,
+    C2: 7.5,
+    L: 1 
+  });
+    return image
+    .addBands(evi_img.rename('EVI')).float();
+};
+
+
+// add indices to Image Collection
+var monthly_col_indices = monthly_col.map(ndvi).map(savi).map(evi).map(ndbi);
+print('Image Collection with vegetation indices', monthly_col_indices);
+
+
+// min and max values for vegetation indices might need to be adjusted in countries with dense vegetation
+Map.addLayer(monthly_col_indices, {bands: 'NDVI', palette: ['red', 'khaki', 'green'], min:-1, max:1},'NDVI');
+Map.addLayer(monthly_col_indices, {bands: 'SAVI', palette: ['red', 'khaki', 'green'], min: -1, max: 1}, 'SAVI');
+Map.addLayer(monthly_col_indices, {bands: 'EVI', palette: ['red', 'khaki', 'green'], min: -1, max: 1}, 'EVI');
+Map.addLayer(monthly_col_indices, {bands: 'NDBI', palette: ['white', 'grey', 'black'], min: -1, max: 1}, 'NDBI');
+
+
+
+//Part IV
+
+// Create trend plot for the vegetation indices                     
+
+// create time-series chart with trendline
+var my_chart= ui.Chart.image.series({imageCollection:
+monthly_col_indices.select(['NDVI', 'SAVI', 'EVI']),
+    region: dhaka,
+    reducer: ee.Reducer.mean(),
+    scale: 600 // change to smaller scale if needed
+  })
+  .setChartType('ScatterChart')
+  .setOptions({
+    title: 'Vegetation indices trend for whole aoi',
+    vAxis:{title: 'Vegetation Index'},
+    hAxis:{title: 'Date'},
+    colors: ['red', 'orange', 'green'],
+    pointSize:2,
+    trendlines: {
+      0: {color: 'red',  visibleInLegend: true},
+      1: {color: 'orange', visibleInLegend: true},
+      2: {color: 'green', visibleInLegend: true},
+    }  
+  });
+
+print(my_chart); 
+
+//Part V
+//Extracting the weather data (Precipitation and Temperature) and Trend Analysis to check seasonal pattern 
+
+//Load monthly weather data and clip to study area
+ var dataset = ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY")
+             .filterBounds(dhaka)
+             .map(function(image){return image.clip(dhaka)});
+              
+              
+var temp_data = dataset.select('temperature_2m');
+var prec_data = dataset.select('total_precipitation');
+
+print("temp_data", temp_data);
+print("prec_data", prec_data);
+
+// Function to convert temperature from K to C
+var  Kelvin_Celsius = function(img) {
+  return img
+    .subtract(273.15)
+    .copyProperties(img, ['system:time_start']);
+};
+
+// convert the units from Kelvin to Celsius
+var temp_data = temp_data.map(Kelvin_Celsius);
+
+
+                      // 2015 - 2019//
+                      
+// filter weather data to the time period 
+// we do this two additional graphes to better visualize the seasonal dynamics
+
+var temp_data_select = temp_data.filterDate(start, end);
+var prec_data_select = prec_data.filterDate(start, end);
+
+// mean temperature development 
+var temp_chart= ui.Chart.image.series({imageCollection:
+temp_data_select,
+    region: dhaka,
+    reducer: ee.Reducer.mean(),
+    scale: 300 // change to smaller scale if needed
+  })
+  .setChartType('ScatterChart')
+  .setOptions({
+    title: 'Temperature trend for time period',
+    vAxis:{title: 'Temperature [C]', viewWindow: {min: 0, max: 35}},
+    hAxis:{title: 'Date'},
+    pointSize:2,
+    trendlines:{0:{color: 'red'}}
+  });
+print(temp_chart);
+
+// mean precipitation development
+var prec_chart= ui.Chart.image.series({imageCollection:
+prec_data_select,
+    region: dhaka,
+    reducer: ee.Reducer.mean(),
+    scale: 300 // change to smaller scale if needed
+  })
+  .setChartType('ScatterChart')
+  .setOptions({
+    title: 'Precipitation trend  for time period',
+    vAxis:{title: 'Precipitation [m]', viewWindow: {min: 0, max: 0.02}},
+    hAxis:{title: 'Date'},
+    pointSize:2,
+    trendlines:{0:{color: 'red'}}
+  });
+print(prec_chart);
+
+//Part VI
+///Joining the NDVI, precipitation, temperature and NDBI data and creating the trend chart
+//to show the relationship
+
+/////  Precipitation
+
+print("monthly_col_indices", monthly_col_indices);
+print("prec_data_select", prec_data_select);
+
+// First, we need to join the weather data with our monthly collection
+// to create a common property for matching we map over both sequences and create 
+// the property "yearmonth" 
+
+// mapping over the sequence
+var monthly_col_indices = ee.ImageCollection.fromImages(
+sequence.map(function(num){
+  // casting element of sequence to a number object
+  num = ee.Number(num);
+  // finding the start and end point of the windows
+  var windowStart = start_date.advance(num.multiply(my_window), 'month');
+  var windowEnd = start_date.advance(num.add(1).multiply(my_window), 'month');
+  // selecting images that fall within those windows
+  var subset = monthly_col_indices.filterDate(windowStart,windowEnd);
+  // get current year and month for properties
+  var yearmonth = ee.Number.parse(windowStart.format('MMYYYY'));
+  // var month = ee.Number.parse(windowStart.format('MM'));
+  // calculating a median image of that window
+  return subset
+         .median()
+         .set('yearmonth', yearmonth)
+         .set('system:time_start', windowStart);
+}));
+
+var prec_data_select = ee.ImageCollection.fromImages(
+sequence.map(function(num){
+  // casting element of sequence to a number object
+  num = ee.Number(num);
+  // finding the start and end point of the windows
+  var windowStart = start_date.advance(num.multiply(my_window), 'month');
+  var windowEnd = start_date.advance(num.add(1).multiply(my_window), 'month');
+  // selecting images that fall within those windows
+  var subset = prec_data_select.filterDate(windowStart,windowEnd);
+  // get current year and month for properties
+  var yearmonth = ee.Number.parse(windowStart.format('MMYYYY'));
+  //var month = ee.Number.parse(windowStart.format('MM'));
+  // calculating a median image of that window
+  return subset
+         .median()
+         // change from double to float
+        // .select(["total_precipitation"]).float()
+         .set('yearmonth', yearmonth)
+         .set('system:time_start', windowStart);
+}));
+
+// We filter by the same time - our just created property
+var filter = ee.Filter.equals({
+  leftField: 'yearmonth',
+  rightField: 'yearmonth'
+});
+
+// Create the join.
+var simpleJoin = ee.Join.inner();
+
+// Inner join
+var innerJoin = ee.ImageCollection(simpleJoin.apply(prec_data_select, monthly_col_indices, filter));
+// Second Image collection is safed as additional bands
+var joined_prec = innerJoin.map(function(feature) {
+  return ee.Image.cat(feature.get('primary'), feature.get('secondary'));
+});
+print("joined_prec", joined_prec);
+
+//// Create time-series chart with trendline (NDVI and Precipitation)
+var my_chart = ui.Chart.image.series({imageCollection: joined_prec.select(["total_precipitation", "NDVI"]),
+                                                  region: dhaka, 
+                                                  reducer: ee.Reducer.mean(),
+                                                  scale: 1000
+}).setOptions({title: "NDVI and Precipitation", pointSize: 3,
+    legend: {maxLines: 5, position: 'top'},
+    series: {
+          0: {targetAxisIndex: 0},
+          1: {targetAxisIndex: 1}
+        },
+        vAxes: {
+          // Adds titles to each axis.
+          0: {title: 'NDVI'},
+          1: {title: 'Precipitation [m]'}
+        },
+    trendlines: {
+        0: {
+          type: 'linear',
+          color: 'lightblue',
+          lineWidth: 3,
+          opacity: 0.7,
+          showR2: true,
+          visibleInLegend: true
+        },
+        1: {
+          type: 'linear',
+          color: 'pink',
+          lineWidth: 3,
+          opacity: 0.7,
+          showR2: true,
+          visibleInLegend: true
+        }
+      },
+});
+
+print(my_chart);
+
+///// Temperature
+
+// to create a common property for matching we map over the sequences and create 
+// the property "yearmonth" 
+
+// mapping over the sequence
+var temp_data_select = ee.ImageCollection.fromImages(
+sequence.map(function(num){
+  // casting element of sequence to a number object
+  num = ee.Number(num);
+  // finding the start and end point of the windows
+  var windowStart = start_date.advance(num.multiply(my_window), 'month');
+  var windowEnd = start_date.advance(num.add(1).multiply(my_window), 'month');
+  // selecting images that fall within those windows
+  var subset = temp_data_select.filterDate(windowStart,windowEnd);
+  // get current year and month for properties
+  var yearmonth = ee.Number.parse(windowStart.format('MMYYYY'));
+  //var month = ee.Number.parse(windowStart.format('MM'));
+  // calculating a median image of that window
+  return subset
+         .median()
+         // change from double to float
+        // .select(["total_tempipitation"]).float()
+         .set('yearmonth', yearmonth)
+         .set('system:time_start', windowStart);
+}));
+
+// We filter by the same time - our just created property
+var filter = ee.Filter.equals({
+  leftField: 'yearmonth',
+  rightField: 'yearmonth'
+});
+
+// Create the join.
+var simpleJoin = ee.Join.inner();
+
+// Inner join
+var innerJoin = ee.ImageCollection(simpleJoin.apply(temp_data_select,monthly_col_indices, filter));
+// Second Image collection is safed as additional bands
+var joined_temp = innerJoin.map(function(feature) {
+  return ee.Image.cat(feature.get('primary'), feature.get('secondary'));
+});
+print("joined_temp", joined_temp);
+
+//// Create time-series chart with trendline (NDVI and Temperature)
+var my_chart = ui.Chart.image.series({imageCollection: joined_temp.select(["temperature_2m", "NDVI"]),
+                                                  region:dhaka, 
+                                                  reducer: ee.Reducer.mean(),
+                                                  scale: 1000
+}).setOptions({title: "NDVI and temperature", pointSize: 3,
+    legend: {maxLines: 5, position: 'top'},
+    series: {
+          0: {targetAxisIndex: 0},
+          1: {targetAxisIndex: 1}
+        },
+        vAxes: {
+          // Adds titles to each axis.
+          0: {title: 'NDVI'},
+          1: {title: 'Temperature [C]'}
+        },
+    trendlines: {
+        0: {
+          type: 'linear',
+          color: 'lightblue',
+          lineWidth: 3,
+          opacity: 0.7,
+          showR2: true,
+          visibleInLegend: true
+        },
+        1: {
+          type: 'linear',
+          color: 'pink',
+          lineWidth: 3,
+          opacity: 0.7,
+          showR2: true,  
+          visibleInLegend: true
+        }
+      },
+});
+
+print(my_chart);
+
+
+///// NDBI
+// mapping over the sequence
+var monthly_col_indices = ee.ImageCollection.fromImages(
+sequence.map(function(num){
+  // casting element of sequence to a number object
+  num = ee.Number(num);
+  // finding the start and end point of the windows
+  var windowStart = start_date.advance(num.multiply(my_window), 'month');
+  var windowEnd = start_date.advance(num.add(1).multiply(my_window), 'month');
+  // selecting images that fall within those windows
+  var subset = monthly_col_indices.filterDate(windowStart,windowEnd);
+  // get current year and month for properties
+  var yearmonth = ee.Number.parse(windowStart.format('MMYYYY'));
+  // calculating a median image of that window
+  return subset
+         .median()
+         .set('yearmonth', yearmonth)
+         .set('system:time_start', windowStart);
+}));
+
+var NDBI_data_select = ee.ImageCollection.fromImages(
+sequence.map(function(num){
+  // casting element of sequence to a number object
+  num = ee.Number(num);
+  // finding the start and end point of the windows
+  var windowStart = start_date.advance(num.multiply(my_window), 'month');
+  var windowEnd = start_date.advance(num.add(1).multiply(my_window), 'month');
+  // selecting images that fall within those windows
+  var subset = prec_data_select.filterDate(windowStart,windowEnd);
+  // get current year and month for properties
+  var yearmonth = ee.Number.parse(windowStart.format('MMYYYY'));
+  //var month = ee.Number.parse(windowStart.format('MM'));
+  // calculating a median image of that window
+  return subset
+         .median()
+         // change from double to float
+        // .select(["total_precipitation"]).float()
+         .set('yearmonth', yearmonth)
+         .set('system:time_start', windowStart);
+}));
+
+// We filter by the same time - our just created property
+var filter = ee.Filter.equals({
+  leftField: 'yearmonth',
+  rightField: 'yearmonth'
+});
+
+// Create the join.
+var simpleJoin = ee.Join.inner();
+
+// Inner join
+var innerJoin = ee.ImageCollection(simpleJoin.apply(NDBI_data_select, monthly_col_indices, filter));
+// Second Image collection is safed as additional bands
+var joined_NDBI = innerJoin.map(function(feature) {
+  return ee.Image.cat(feature.get('primary'), feature.get('secondary'));
+});
+print("joined_NDBI", joined_NDBI);
+
+//// Create time-series chart with trendline (NDVI and NDBI)
+var my_chart = ui.Chart.image.series({imageCollection: joined_NDBI.select(["NDBI", "NDVI"]),
+                                                  region: dhaka, 
+                                                  reducer: ee.Reducer.mean(),
+                                                  scale: 1000
+}).setOptions({title: "NDVI and NDBI", pointSize: 3,
+    legend: {maxLines: 5, position: 'top'},
+    series: {
+          0: {targetAxisIndex: 0},
+          1: {targetAxisIndex: 1}
+        },
+        vAxes: {
+          // Adds titles to each axis.
+          0: {title: 'NDVI'},
+          1: {title: 'NDBI'}
+        },
+    trendlines: {
+        0: {
+          type: 'linear',
+          color: 'lightblue',
+          lineWidth: 3,
+          opacity: 0.7,
+          showR2: true,
+          visibleInLegend: true
+        },
+        1: {
+          type: 'linear',
+          color: 'pink',
+          lineWidth: 3,
+          opacity: 0.7,
+          showR2: true,
+          visibleInLegend: true
+        }
+      },
+});
+
+print(my_chart);
+
+//Part VII 
+// Analysisng Pearson Correlation among NDVI, NDBI, Precipitation and Temperature
+// Precipitation
+print(ui.Chart.image.series({
+  imageCollection: joined_prec.select(['NDVI','total_precipitation']),
+  region:dhaka,
+  reducer: ee.Reducer.pearsonsCorrelation(),
+  scale: 1000}).setOptions({title: "Pearson correlation - NDVI and precipitation", pointSize: 1}));
+
+// Temperature
+print(ui.Chart.image.series({
+  imageCollection: joined_temp.select(['NDVI','temperature_2m']),
+  region: dhaka,
+  reducer: ee.Reducer.pearsonsCorrelation(),
+  scale: 1000}).setOptions({title: "Pearson correlation - NDVI and temperature", pointSize: 1}));
+  
+
+//NDBI 
+print(ui.Chart.image.series({
+  imageCollection: joined_NDBI.select(['NDVI','NDBI']),
+  region: dhaka,
+  reducer: ee.Reducer.pearsonsCorrelation(),
+  scale: 1000}).setOptions({title: "Pearson correlation - NDVI and NDBI", pointSize: 1}));
+  
