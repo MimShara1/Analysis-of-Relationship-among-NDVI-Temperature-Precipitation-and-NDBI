@@ -8,4 +8,4 @@ III)To analyse temperature and precipitation trend for a particular time range
 IV) To analyse relationship among Vegetation trends,Temperature, Precipitatiopn and NDBI.  
 
 
-Citation: https://code.earthengine.google.com/?accept_repo=users/maierjana/Africa_vegetation_trend_agriculture
+
